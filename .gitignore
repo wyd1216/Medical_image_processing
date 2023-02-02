@@ -1,0 +1,37 @@
+###########################################
+############ Project Specific ############
+###########################################
+## folders to ignore
+
+###########################################
+############ General Setttings ############
+###########################################
+# Video / Image related
+*.avi
+*.mp4
+*.jpg
+*.jpeg
+# *.png
+*.bmp
+
+*.log
+*.bak
+*.pyc
+__pycache__/
+.ipynb_checkpoints/
+.cache
+
+# Intermediate files
+*.zip
+*.tar
+*.tar
+*.csv
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
