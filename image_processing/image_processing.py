@@ -31,6 +31,25 @@ plt.style.use(pathlib.Path(__file__).parent / 'mplstyle' / 'wydplot.mplstyle')
 
 
 # plt func
+def multi_image_show(array, cols=None):
+    # Set up the plot
+    subfig_num = len(array)
+    if cols:
+        cols = cols
+    elif len(array) < 4:
+        cols = subfig_num
+    else:
+        cols = 4
+    rows, fig, ax = subplots_extension(subfig_num, cols)
+    for i in range(subfig_num):
+        _ = ax[i // cols, i % cols].imshow(array[i], 'gray')
+        _ = ax[i // cols, i % cols].axis('off')  # 不显示坐标尺寸
+        _ = ax[i // cols, i % cols].set_xticks([])
+        _ = ax[i // cols, i % cols].set_yticks([])
+    subplots_remove_residual(ax, subfig_num, rows, cols)
+    # Save the plot to file (if applicable) and return the plot axis object
+    return fig, ax
+
 def subplots_remove_residual(ax, subfig_num, rows, cols):
     for i in range(subfig_num, cols * rows):
         ax[i // cols, i % cols].set_xticks([])
@@ -359,7 +378,6 @@ def get_masked_slices(img_array, anno_array):
     return img_array, anno_array, fusion_array
 
 
-    
 # =============================================================================================
 
 # =============================================== Image convert ==============================================
@@ -374,19 +392,23 @@ def cvt_nifti2dicom(new_img, out_dir, meta_data=None):
     if meta_data is not None:
         series_tag_values = [(key, value) for key, value in meta_data.items()]
     else:
-        series_tag_values = [("0008|0031",modification_time), # Series Time
-                        ("0008|0021",modification_date), # Series Date
-                        ("0008|0008","DERIVED\\SECONDARY"), # Image Type
-                        ("0020|000e", "1.2.826.0.1.3680043.2.1125."+modification_date+".1"+modification_time), # Series Instance UID
-                        ("0020|0037", '\\'.join(map(str, (direction[0], direction[3], direction[6],# Image Orientation (Patient)
-                                                            direction[1],direction[4],direction[7])))),
-                        ("0008|103e", "Created-SimpleITK")] # Series Description
+        series_tag_values = [("0008|0031", modification_time),  # Series Time
+                             ("0008|0021", modification_date),  # Series Date
+                             ("0008|0008", "DERIVED\\SECONDARY"),  # Image Type
+                             (
+                             "0020|000e", "1.2.826.0.1.3680043.2.1125." + modification_date + ".1" + modification_time),
+                             # Series Instance UID
+                             ("0020|0037", '\\'.join(
+                                 map(str, (direction[0], direction[3], direction[6],  # Image Orientation (Patient)
+                                           direction[1], direction[4], direction[7])))),
+                             ("0008|103e", "Created-SimpleITK")]  # Series Description
 
     # Write slices to output directory
     list(map(lambda i: writeSlices(series_tag_values, new_img, i, out_dir), range(new_img.GetDepth())))
-    
+
+
 def writeSlices(series_tag_values, new_img, i, out_dir):
-    image_slice = new_img[:,:,i]
+    image_slice = new_img[:, :, i]
     writer = sitk.ImageFileWriter()
     writer.KeepOriginalImageUIDOn()
 
@@ -394,15 +416,16 @@ def writeSlices(series_tag_values, new_img, i, out_dir):
     list(map(lambda tag_value: image_slice.SetMetaData(tag_value[0], tag_value[1]), series_tag_values))
 
     # Slice specific tags.
-    image_slice.SetMetaData("0008|0012", time.strftime("%Y%m%d")) # Instance Creation Date
-    image_slice.SetMetaData("0008|0013", time.strftime("%H%M%S")) # Instance Creation Time
+    image_slice.SetMetaData("0008|0012", time.strftime("%Y%m%d"))  # Instance Creation Date
+    image_slice.SetMetaData("0008|0013", time.strftime("%H%M%S"))  # Instance Creation Time
 
     # Setting the type to CT preserves the slice location.
     image_slice.SetMetaData("0008|0060", "CT")  # set the type to CT so the thickness is carried over
 
     # (0020, 0032) example_image position patient determines the 3D spacing between slices.
-    image_slice.SetMetaData("0020|0032", '\\'.join(map(str,new_img.TransformIndexToPhysicalPoint((0,0,i))))) # Image Position (Patient)
-    image_slice.SetMetaData("0020|0013", str(i)) # Instance Number
+    image_slice.SetMetaData("0020|0032", '\\'.join(
+        map(str, new_img.TransformIndexToPhysicalPoint((0, 0, i)))))  # Image Position (Patient)
+    image_slice.SetMetaData("0020|0013", str(i))  # Instance Number
 
     # Write to the output directory and add the extension dcm, to force writing in DICOM format.
     writer.SetFileName(os.path.join(out_dir, str(i).zfill(4) + '.dcm'))
@@ -547,6 +570,7 @@ def array3d2png(array3d, slice_indices, savepath, low_window, high_window):
         png_paths.append(png_path)
     return png_paths
 
+
 ##method1 --opencv
 def get_largest_connect_component1(img):
     """
@@ -589,6 +613,7 @@ def get_largest_connect_component1(img):
         max_contour_area = 0
     return max_contour_area, img_gray
 
+
 def getmaxcomponent(mask_array, num_limit=10):
     # sitk方法获取连通域
     cca = sitk.ConnectedComponentImageFilter()
@@ -601,8 +626,8 @@ def getmaxcomponent(mask_array, num_limit=10):
     max_label = 0
     max_num = 0
     # 不必遍历全部连通域，一般在前面就有对应全身mask的label，减少计算时间
-    for i in range(1, num_limit):  
-        if np.sum(labeled_img == i) < 1e5: # 全身mask的体素数量必然很大，小于设定值的不考虑
+    for i in range(1, num_limit):
+        if np.sum(labeled_img == i) < 1e5:  # 全身mask的体素数量必然很大，小于设定值的不考虑
             continue
         if np.sum(labeled_img == i) > max_num:
             max_num = np.sum(labeled_img == i)
@@ -618,16 +643,18 @@ def get_body(CT_nii_array):
     """
     # 阈值二值化，获得最大的3d的连通域
     CT_array = np.copy(CT_nii_array)
+    print(CT_array)
     arr_min = np.min(CT_array)
     if arr_min < -500:
         # For remove the bed by this value.
         threshold_all = -300
     else:
-        threshold_all = int(np.min(CT_array) + (np.max(CT_array)-np.min(CT_array)) * 0.55)   # 卡的阈值，卡出整个身体以及机床部分
+        threshold_all = int(np.min(CT_array) + (np.max(CT_array) - np.min(CT_array)) * 0.55)  # 卡的阈值，卡出整个身体以及机床部分
     CT_array[CT_nii_array >= threshold_all] = 1
     CT_array[CT_nii_array < threshold_all] = 0
     body_mask1 = getmaxcomponent(CT_array, 10)
     return body_mask1.astype(np.uint8)
+
 
 def remove_shell(sitk_image, num=1):
     array = sitk.GetArrayFromImage(sitk_image)
@@ -636,6 +663,7 @@ def remove_shell(sitk_image, num=1):
     new_sitk_image.SetSpacing(sitk_image.GetSpacing())
     new_sitk_image.SetOrigin(sitk_image.GetOrigin())
     return new_sitk_image
+
 
 def get_largest_contour_region(array2d):
     mask = array2d.copy()
@@ -659,7 +687,7 @@ def get_largest_contour_region(array2d):
     # 寻找轮廓
     contours, hierarchy = cv2.findContours(Gaussian, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     contours, hierarchy = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    
+
     if len(contours) == 0:
         return mask
     area = []
@@ -674,14 +702,14 @@ def get_largest_contour_region(array2d):
 
 class ImageProcess:
 
-    def __init__(self, image, mask=None, window_center_width=None):
+    def __init__(self, image, mask=None):
         """
         Class to read sitk.Image and make processing.
 
         Parameters
         ----------
         image: str or sitk.Image
-            The input img array in 2D or 3D. If 2D, shape is (h, w), if 3D, shape is (h, w, t).
+            The input img array in 2D or 3D. If 2D, shape is (h, w), if 3D, shape is (h, w, c).
         mask: str, sitk.Image or None, default None
 
         window_center_width: tuple(center, width), default None
@@ -701,14 +729,60 @@ class ImageProcess:
             self._mask_meta = {}
 
         # Get number of series slices.
-        if window_center_width:
-            wincenter, winwidth = window_center_width
-            self._low_window = wincenter - winwidth // 2
-            self._high_window = wincenter + winwidth // 2
+        image_array = sitk.GetArrayFromImage(self._image)
+        self._low_window = np.min(image_array)
+        self._high_window = np.max(image_array)
+
+    def plot_single_slice(self,
+                          slice_num=-1,
+                          is_masked=False,
+                          savefig=None):
+        """
+        Plots a single slice of the image, with or without mask, and saves the plot to file if specified.
+
+        Args:
+            slice_num (int): the index of the slice to plot, default -1 (middle slice).
+            is_masked (bool): whether to plot the mask overlay on the image, default False.
+            savefig (str): the file name to save the plot to, default None.
+
+        Returns:
+            ax: the plot axis object.
+        """
+
+        # Get the number of channels in the image
+        channel_num = self.size[-1]
+
+        # If slice_num is out of bounds, set it to the middle slice
+        if slice_num < 0 or slice_num > channel_num - 1:
+            print(
+                f'Total {channel_num} slices in the dicoms sequences, the outer value will set the slice_num to be median one.')
+            slice_num = channel_num // 2
+
+        # Get the image array and the slice to plot
+        image_array = sitk.GetArrayFromImage(self._image)
+        image_slice = image_array[slice_num]
+
+        # Convert the image to uint8
+        image_slice = image_convert_uint8(image_slice, self._low_window, self._high_window)
+
+        # If masked, get the mask array and the masked slice
+        if not self._mask:
+            is_masked = False
+        if is_masked:
+            mask_array = sitk.GetArrayFromImage(self._mask)
+            mask_slice = mask_array[slice_num].astype('uint8')
+            fusion_slice = fusion_image_mask(image_slice, mask_slice)
         else:
-            image_array = sitk.GetArrayFromImage(self._image)
-            self._low_window = np.min(image_array)
-            self._high_window = np.max(image_array)
+            fusion_slice = image_slice
+
+        fig, ax = multi_image_show(np.array([image_slice, fusion_slice]))
+
+        # # Save the plot to file (if applicable) and return the plot axis object
+        if savefig:
+            plt.savefig(savefig)
+        return ax
+
+    # Optimized above
 
     def saveimg(self, savepath, format='nii', meta_data=True):
         """_summary_
@@ -757,41 +831,6 @@ class ImageProcess:
             savepath.mkdir(parents=True, exist_ok=True)
             cvt_nifti2dicom(self._mask, savepath, meta_data=self._image_meta)
 
-    def plot_single_slice(self,
-                          slice_num=-1,
-                          is_masked=False,
-                          savefig=None):
-        if slice_num == -1:
-            masked_indices = self.get_masked_indices()
-            if len(masked_indices) > 0:
-                slice_num = 0
-            else:
-                slice_num = masked_indices[len(masked_indices) // 2]
-        image_array = sitk.GetArrayFromImage(self._image)
-        image_slice = image_array[slice_num]
-        image_slice = image_convert_uint8(image_slice, self._low_window,
-                                          self._high_window)
-        if is_masked:
-            mask_array = sitk.GetArrayFromImage(self._mask)
-            mask_slice = mask_array[slice_num].astype('uint8')
-            fusion_slice = fusion_image_mask(image_slice, mask_slice)
-        else:
-            fusion_slice = image_slice
-        rows, cols = 1, 2
-        fig, ax = plt.subplots(rows,
-                               cols,
-                               sharex='col',
-                               sharey='row',
-                               figsize=(cols * 3, rows * 3))
-        if rows == 1:
-            ax = np.array([ax])
-        if cols == 1:
-            ax = np.array([[x] for x in ax])
-        ax[0, 0].imshow(image_slice, 'gray')
-        ax[0, 1].imshow(fusion_slice, 'gray')
-        if savefig:
-            plt.savefig(savefig)
-        return ax
 
     def plot_masked_slices(self, is_masked=True, savefig=None):
         image_array = sitk.GetArrayFromImage(self._image)
@@ -813,7 +852,7 @@ class ImageProcess:
         subplots_remove_residual(ax, subfig_num, rows, cols)
         if savefig:
             plt.savefig(savefig)
-            
+
     def get_masked_indices(self, pixel_value=None):
         if self._mask:
             mask_array = sitk.GetArrayFromImage(self._mask)
@@ -861,68 +900,69 @@ class ImageProcess:
         array2png(new_image2d, str(save_rect_path), low_window=self._low_window, high_window=self._high_window)
         return save_png_path, save_rect_path
 
-    def reset_window(self, win_center_width=None):
-        if win_center_width is None:
-            self._image = dicom_window_adjust(
-                self._image,
-                wincenter=(self._low_window + self._high_window) // 2,
-                winwidth=self._high_window - self._low_window)
-        else:
-            self._image = dicom_window_adjust(self._image,
-                                              wincenter=win_center_width[0],
-                                              winwidth=win_center_width[1])
-        self._image = write_metadata(self._image, self._image_meta)
-        
-#     def get_largest_connect_area(self):
-#         array = sitk.GetArrayFromImage(self._image)
-#         masked_image_array, masked_mask_array, indices = self.get_masked_array()
-#         array_mask = get_body(masked_image_array)
-#         array2d = array_mask[0]
-#         max_area, array2d = get_largest_connect_component1(array2d)
-#         nonzero = np.nonzero(array2d)
-#         x_min, x_max, y_min, y_max = np.min(nonzero[0]), np.max(nonzero[0]), np.min(nonzero[1]), np.max(nonzero[1])
-#         # x_min, x_max, y_min, y_max = x_min - 5, x_max + 5, y_min - 5, y_max + 5
-#         
-#         array3d = np.array([array2d for x in range(len(array))])
-#         
-#         # 这里注意不能直接乘上mask，因为dicom image最小元素为-1024而不是0.
-#         array_new = np.select([array3d==0],[np.min(array)], default=array)
-#         
-#         array_new1 = array.copy()
-#         array_new1[:, :x_min, :] = np.min(array)
-#         array_new1[:, x_max:, :] = np.min(array)
-#         array_new1[:, :, :y_min] = np.min(array)
-#         array_new1[:, :, y_max:] = np.min(array)
-#         
-#         # extract_array = array[x_min:x_max, y_min:y_max]
-#         
-#         sitk_image = sitk.GetImageFromArray(array_new1)
-#         sitk_image.CopyInformation(self._image)
-#         self._image = sitk_image
-        
+    def reset_window(self, win_center_width):
+        # Adjust the image window using dicom_window_adjust with win_center and win_width values
+        # Update the _image variable with the adjusted image
+        # Pass _image_meta as the metadata parameter to write_metadata function
+        win_center, win_width = win_center_width
+        self._image = write_metadata(dicom_window_adjust(self._image,
+                                                         wincenter=win_center,
+                                                         winwidth=win_width),
+                                     self._image_meta)
+
+    #     def get_largest_connect_area(self):
+    #         array = sitk.GetArrayFromImage(self._image)
+    #         masked_image_array, masked_mask_array, indices = self.get_masked_array()
+    #         array_mask = get_body(masked_image_array)
+    #         array2d = array_mask[0]
+    #         max_area, array2d = get_largest_connect_component1(array2d)
+    #         nonzero = np.nonzero(array2d)
+    #         x_min, x_max, y_min, y_max = np.min(nonzero[0]), np.max(nonzero[0]), np.min(nonzero[1]), np.max(nonzero[1])
+    #         # x_min, x_max, y_min, y_max = x_min - 5, x_max + 5, y_min - 5, y_max + 5
+    #
+    #         array3d = np.array([array2d for x in range(len(array))])
+    #
+    #         # 这里注意不能直接乘上mask，因为dicom image最小元素为-1024而不是0.
+    #         array_new = np.select([array3d==0],[np.min(array)], default=array)
+    #
+    #         array_new1 = array.copy()
+    #         array_new1[:, :x_min, :] = np.min(array)
+    #         array_new1[:, x_max:, :] = np.min(array)
+    #         array_new1[:, :, :y_min] = np.min(array)
+    #         array_new1[:, :, y_max:] = np.min(array)
+    #
+    #         # extract_array = array[x_min:x_max, y_min:y_max]
+    #
+    #         sitk_image = sitk.GetImageFromArray(array_new1)
+    #         sitk_image.CopyInformation(self._image)
+    #         self._image = sitk_image
+
     def get_largest_connect_area(self):
-        array = sitk.GetArrayFromImage(self._image)
-        
+        image_array = sitk.GetArrayFromImage(self._image)
+
         # Select the masked slices to get connect region.
         indices = self.get_masked_indices()
-        masked_image_array = array[indices]
-        
+        if indices:
+            masked_image_array = image_array[indices]
+        else:
+            masked_image_array = image_array
+
         # Get the largest masked region
         array_mask = get_body(masked_image_array)
         # array3d = np.array([get_largest_connect_component1(x)[1] for x in array_mask])
         # array2d = np.sum(array3d, axis=0)
-        
+
         # Again Get the largest region of the mask.
         # array2d = get_largest_connect_component1(array_mask[0])[1]
         array2d = array_mask[0]
         array2d = image_convert_uint8(array2d, np.min(array2d), np.max(array2d))
-        
+
         # Fill the region of largest contour and return the final mask.
         array2d = get_largest_contour_region(array2d)
-        array3d = np.array([array2d for x in range(len(array))])
-        
+        array3d = np.array([array2d for x in range(len(image_array))])
+
         # 这里注意不能直接乘上mask，因为dicom image最小元素为-1024而不是0.
-        array_new = np.select([array3d==0],[np.min(array)], default=array)
+        array_new = np.select([array3d == 0], [np.min(image_array)], default=image_array)
         sitk_image = sitk.GetImageFromArray(array_new)
         sitk_image.CopyInformation(self._image)
         self._image = sitk_image
@@ -934,7 +974,7 @@ class ImageProcess:
             self._mask = sitk_resample_spacing(self._mask, is_label=True,
                                                out_spacing=out_spacing)
             self._mask = write_metadata(self._mask, self._image_meta)
-        
+
         # Check addtional slices
         masked_indices = self.get_masked_indices()
         if masked_indices[-1] - masked_indices[0] + 1 != len(masked_indices):
@@ -1001,27 +1041,27 @@ class ImageProcess:
             info_dict['vol'] = round(vol_lesion)
             info_list.append(info_dict)
         return info_list
-    
+
     def get_base_info(self, mask_val=-1):
         info_dict = {}
         info_dict['size'] = tuple(reversed(self._image.GetSize()))
         info_dict['spacing'] = tuple(reversed([round(x, 2) for x in (self._image).GetSpacing()]))
-        
+
         image_array = sitk.GetArrayFromImage(self._image)
         img_min = np.min(image_array)
-        image_array = np.select([image_array>img_min+10], [1], default=0)
+        image_array = np.select([image_array > img_min + 10], [1], default=0)
         image_nonzero = np.nonzero(image_array)
         image_low = (np.min(image_nonzero[0]), np.min(image_nonzero[1]), np.min(image_nonzero[2]))
         image_high = (np.max(image_nonzero[0]), np.max(image_nonzero[1]), np.max(image_nonzero[2]))
         image_bias = tuple((image_high[i] - image_low[i] + 1) for i in range(len(image_low)))
         info_dict['image_low'] = image_low
         info_dict['image_bias'] = image_bias
-        
+
         mask_array = sitk.GetArrayFromImage(self._mask)
         if mask_val != -1:
-            mask_array = np.select([mask_array==mask_val], [1], default=0)
+            mask_array = np.select([mask_array == mask_val], [1], default=0)
         else:
-            mask_array = np.select([mask_array>0], [1], default=0)
+            mask_array = np.select([mask_array > 0], [1], default=0)
         mask_nonzero = np.nonzero(mask_array)
         mask_low = (np.min(mask_nonzero[0]), np.min(mask_nonzero[1]), np.min(mask_nonzero[2]))
         mask_high = (np.max(mask_nonzero[0]), np.max(mask_nonzero[1]), np.max(mask_nonzero[2]))
@@ -1056,7 +1096,7 @@ class ImageProcess:
     def print_meta_info(self):
         for key, value in self._image_meta.items():
             print(key, ':', value)
-            
+
     def print_info(self):
         print('spacing : ', self.spacing)
         print('size : ', self.size)
@@ -1067,13 +1107,19 @@ class ImageProcess:
         print('pixel value range : ', (pixel_min, pixel_max))
 
     @property
+    def image(self):
+        return self._image
+
+    @property
+    def mask(self):
+        return self._mask
+    @property
     def size(self):
         return self._image.GetSize()
 
     @property
     def spacing(self):
         return self._image.GetSpacing()
-
     @property
     def mask_size(self):
         if self._mask:
