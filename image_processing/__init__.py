@@ -8,8 +8,9 @@ Description:
 
 Copyright (c) 2022 by Yudong Wang yudongwang117@icloud.com, All Rights Reserved. 
 '''
-from .image_processing import *
-from .image_batch_processing import *
+from .medical_image_processing import *
+from .image2d_processing import *
+# from .image_batch_processing import *
 from .table_info_check import *
 from .util import *
 from .convert import *
