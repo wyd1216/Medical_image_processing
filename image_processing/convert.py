@@ -1,7 +1,7 @@
 import pathlib
 import shutil
 from tqdm import tqdm
-from image_processing import ImageProcess
+from image_processing import MedicalImageProcessor
 
 
 def convert_nifti_batch_to_dicom(info_table, nifti_col, dicom_col, overwrite=True):
@@ -14,5 +14,5 @@ def convert_nifti_batch_to_dicom(info_table, nifti_col, dicom_col, overwrite=Tru
         else:
             if dicom_dir_path.exists():
                 shutil.rmtree(dicom_dir_path, ignore_errors=True)
-        imgprs = ImageProcess(nii_file_path)
+        imgprs = MedicalImageProcessor(nii_file_path)
         imgprs.saveimg(savepath=dicom_dir_path, format='dcm', meta_data=False)

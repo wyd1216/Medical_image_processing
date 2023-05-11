@@ -10,7 +10,7 @@ import SimpleITK as sitk
 from natsort import os_sorted
 
 from image_processing.util import wprint
-from image_processing import ImageProcess
+from image_processing import MedicalImageProcessor
 from image_processing import get_meta_reader
 #
 '''
@@ -32,7 +32,7 @@ def select_array_by_sum(array):
         array (np.array): 3-dimension
 
     Returns:
-        1d np.array: the indices range by 2d-sum
+        1d np.array: the indices key by 2d-sum
     """
     array_sum = array.sum(axis=(1, 2))
     index_val = np.argsort(array_sum)
@@ -43,9 +43,9 @@ def adjust_box_range(box_array, low=0, high=512):
     box_l = box_array[0]
     box_h = box_array[1]
     if box_h[0] - box_l[0] > high - low:
-        print('box range larger than box boundary setting')
+        print('box key larger than box boundary setting')
     if box_h[1] - box_l[1] > high - low:
-        print('box range larger than box boundary setting')
+        print('box key larger than box boundary setting')
     for ind, val in enumerate(box_l):
         if val < low:
             box_h[ind] = low - box_l[ind] + box_h[ind]
@@ -205,6 +205,15 @@ def set_ranknum_by_group(df, group_col, rank_col, add_col_name=None, ascending=F
         tmp_df[group_col]).rank(method='first', ascending=ascending)
     return tmp_df
 
+def datasetinfo_merge(info_list):
+    """ 
+    info: list of DatasetInfo
+    """
+    datasetinfo0 = info_list[0]
+    for x in info_list[1:]:
+        datasetinfo0.merge_info(x)
+    return datasetinfo0
+
 
 class DatasetManipulation:
 
@@ -230,13 +239,13 @@ class DatasetManipulation:
         mark_num_info.to_csv(self._savepath / 'mark_number.csv', index=0)
 
     def set_image_info(self):
-        exp_img = ImageProcess(self._info.loc[0, 'image_path'], self._info.loc[0, 'anno_path'])
+        exp_img = MedicalImageProcessor(self._info.loc[0, 'image_path'], self._info.loc[0, 'anno_path'])
         exp_img_info = exp_img.get_info()[0]
         cols = list(exp_img_info.keys())
         cols = ['image_path', 'anno_path'] + cols
         tmp_info = pd.DataFrame(columns=cols)
         for ind_, row in tqdm(self._info.iterrows()):
-            imgprs = ImageProcess(row['image_path'], row['anno_path'])
+            imgprs = MedicalImageProcessor(row['image_path'], row['anno_path'])
             infos = imgprs.get_info()
             for info in infos:
                 sinfo = {
@@ -260,7 +269,7 @@ class DatasetManipulation:
         """
         tmp_info = pd.DataFrame()
         for ind_, row in tqdm(self.current_info.iterrows()):
-            imgprs = ImageProcess(row[image_col], row[anno_col])
+            imgprs = MedicalImageProcessor(row[image_col], row[anno_col])
             if 'pixel_value' in list(row.keys()):
                 mask_val = row['pixel_value']
             else:
@@ -347,7 +356,7 @@ class DatasetManipulation:
                     image_saved_path.unlink()
                 if anno_saved_path.exists() and anno_saved_path.is_file():
                     anno_saved_path.unlink()
-            imgprs = ImageProcess(image_path, anno_path)
+            imgprs = MedicalImageProcessor(image_path, anno_path)
             imgprs.reset_window(win_center_width=(80, 250))
             imgprs.remove_machine_bed()
             imgprs.saveimg(savepath=image_root / image_name, format='nrrd')
@@ -376,7 +385,7 @@ class DatasetManipulation:
                     image_saved_path.unlink()
                 if anno_saved_path.exists() and anno_saved_path.is_file():
                     anno_saved_path.unlink()
-            imgprs = ImageProcess(image_path, anno_path)
+            imgprs = MedicalImageProcessor(image_path, anno_path)
             # imgprs.reset_window(win_center_width=(80, 250))
             imgprs.get_largest_connect_area()
             if out_spacing is not None:
@@ -412,7 +421,7 @@ class DatasetManipulation:
                     image_saved_path.unlink()
                 if anno_saved_path.exists() and anno_saved_path.is_file():
                     anno_saved_path.unlink()
-            imgprs = ImageProcess(image_path, anno_path)
+            imgprs = MedicalImageProcessor(image_path, anno_path)
             # imgprs.reset_window(win_center_width=(80, 250))
             imgprs.get_largest_connect_area()
             if out_spacing is not None:
@@ -426,6 +435,15 @@ class DatasetManipulation:
         if savemask:
             new_info['dcm_anno_path'] = new_info['image_path'].apply(lambda x: str(pathlib.Path(anno_root)/(x.split('/')[-1])))
         self.update(new_info)
+
+    def merge_info(self, info): 
+        """
+        info: pandas.DataFrame or DatasetInfo
+        """
+        if isinstance(info, pd.DataFrame):
+            self.update(pd.concat([self.info, info], axis=0))
+        elif isinstance(info, DatasetInfo):
+            self.update(pd.concat([self.info, info.info], axis=0))
 
     def convert2png(self,
                     savepath=None,
@@ -464,7 +482,7 @@ class DatasetManipulation:
                                           remove_suffix='.' + image_type)
             png_path = image_root / png_dir_name
             png_path.mkdir(parents=True, exist_ok=True)
-            imgprs = ImageProcess(image_path, anno_path)
+            imgprs = MedicalImageProcessor(image_path, anno_path)
             if reset_window is not None:
                 imgprs.reset_window(win_center_width=reset_window)
             image_array, mask_array, indices = imgprs.get_masked_array(
@@ -538,7 +556,7 @@ class DatasetManipulation:
             png_dir_name = pathlib.Path(image_path).name
             png_dir = self._savepath / png_dir_name
             png_dir.mkdir(parents=True, exist_ok=True)
-            imgprs = ImageProcess(image_path, anno_path, window_center_width=((low_window + high_window) // 2, high_window - low_window))
+            imgprs = MedicalImageProcessor(image_path, anno_path, window_center_width=((low_window + high_window) // 2, high_window - low_window))
             imgprs.remove_machine_bed()
             index, png_path = imgprs.generate_single_png(savepath=png_dir)
             png_index.append(index)
@@ -561,7 +579,7 @@ class DatasetManipulation:
             png_dir_name = pathlib.Path(image_path).name
             png_dir = self._savepath / png_dir_name
             png_dir.mkdir(parents=True, exist_ok=True)
-            imgprs = ImageProcess(image_path, anno_path, window_center_width=((low_window + high_window) // 2, high_window - low_window))
+            imgprs = MedicalImageProcessor(image_path, anno_path, window_center_width=((low_window + high_window) // 2, high_window - low_window))
             imgprs.remove_machine_bed()
             max_roi_path, max_rect1_path = imgprs.generate_hcc_tmp(index=index, savepath=png_dir)
             max_roi_paths.append(str(max_roi_path))
