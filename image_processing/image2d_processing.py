@@ -120,8 +120,8 @@ def array2png(array, savepath, low_window=None, high_window=None):
     """
     array: np.array,
     savepath: str, the name of saved new img.
-    low_window: min value of img
-    high_window: max value of img
+    low_window: vmin value of img
+    high_window: vmax value of img
     """
     if not low_window:
         low_window = min(array)
@@ -153,7 +153,7 @@ def remove_low_pixel_areas(img, threshold):
 # method1 --opencv
 def get_largest_connect_component1(img):
     """
-    Get the mask of largest connect component.
+    Get the label of largest connect component.
 
     Parameters
     ----------
@@ -162,7 +162,7 @@ def get_largest_connect_component1(img):
 
     Returns:
         tuple = (float, np.array)
-        The area of largest connect component and the mask.
+        The area of largest connect component and the label.
     """
     # rgb->gray
     if len(img.shape) == 3:
@@ -196,7 +196,7 @@ def get_largest_connect_component1(img):
 ##method2 --opencv+skimage
 def get_largest_connect_component2(img):
     """
-    Get the mask of largest connect component.
+    Get the label of largest connect component.
 
     Parameters
     ----------
@@ -205,7 +205,7 @@ def get_largest_connect_component2(img):
 
     Returns:
         tuple = (float, numpy.array)
-        The area of largest connect component and the mask.
+        The area of largest connect component and the label.
     """
     # rgb->gray
     if len(img.shape) == 3:
@@ -326,7 +326,7 @@ def npy2png(npyarray, savepath, low_window=None, high_window=None, names=None):
     names : list
         if dimension of npyarray == 3, then the names of the converted png files.
     """
-    # Set range of pixel value.
+    # Set key of pixel value.
     if isinstance(npyarray, str):
         npyarray = np.load(npyarray)
     if low_window is None:
@@ -356,8 +356,8 @@ def npy2png(npyarray, savepath, low_window=None, high_window=None, names=None):
 def npy2png0(array, save_path, low_window, high_window):
     """ 
     array: np.array
-    low_window: min value of img
-    high_window: max value of img
+    low_window: vmin value of img
+    high_window: vmax value of img
     save_path: the name of saved new img.
     """
     lungwin = np.array([low_window * 1., high_window * 1.])
@@ -377,12 +377,12 @@ def get_nonzero_indices(array):
 def fusion_image_mask(image, mask):
     '''
     param image: np.array dtypes=uint8, np.array 2D
-    param mask: np.array dtypes=uint8, np.array 2D
+    param label: np.array dtypes=uint8, np.array 2D
     param color_map: int, 0-12
     return fusion_image.
     '''
     pixel_values = [x for x in np.unique(mask) if x != 0]
-    # Uniform gray mask. From shape=(w, h) to (w, h, 3)
+    # Uniform gray label. From shape=(w, h) to (w, h, 3)
     mask_uniform = np.select([mask > 0], [1], default=0).astype('uint8')
     mask_gray = cv2.cvtColor(mask_uniform, cv2.COLOR_BGR2RGB)
 
@@ -395,14 +395,14 @@ def fusion_image_mask(image, mask):
     for pixel in pixel_values:
         single_mask = np.select([mask == pixel], [pixel],
                                 default=0).astype('uint8')
-        # Extract the mask in image
+        # Extract the label in image
         single_mask = single_mask // pixel
         color_ind = pixel % 12
         single_roi = image * single_mask
         # Convert 3D-roi by apply color map
         single_rgb_roi = cv2.applyColorMap(single_roi, color_ind)
         # Zero-region of roi maybe get non-zero value after convert to
-        # RGB. multiply it by converted RGB-mask to reset it zero.
+        # RGB. multiply it by converted RGB-label to reset it zero.
         single_mask_gray = cv2.cvtColor(single_mask, cv2.COLOR_BGR2RGB)
         single_rgb_roi = single_rgb_roi * single_mask_gray
         roi_list.append(single_rgb_roi)
@@ -476,17 +476,17 @@ class Image2dProcessing:
 
     def image_show(self, is_masked=False, savefig=None):
         """
-        Plots a single slice of the image, with or without mask, and saves the plot to file if specified.
+        Plots a single slice of the image, with or without label, and saves the plot to file if specified.
 
         Args:
-            is_masked (bool): Whether to plot the mask overlay on the image, default False.
+            is_masked (bool): Whether to plot the label overlay on the image, default False.
             savefig (str): The file name to save the plot to, default None.
 
         Returns:
             ax: The plot axis object.
         """
 
-        # Check if mask exists and set is_masked accordingly
+        # Check if label exists and set is_masked accordingly
         is_masked = is_masked and bool(self._mask)
 
         # Get the image to plot
@@ -555,18 +555,18 @@ class Image2dProcessing:
         # Apply probabilistic Hough transform to detect straight lines in the image
         lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=150, minLineLength=200, maxLineGap=1)
 
-        # Create a mask to store the detected lines
+        # Create a label to store the detected lines
         mask = np.zeros_like(gray)
 
-        # Draw the detected lines on the mask
+        # Draw the detected lines on the label
         for line in lines:
             x1, y1, x2, y2 = line[0]
             cv2.line(mask, (x1, y1), (x2, y2), 255, 3)
 
-        # Apply bitwise not to invert the mask
+        # Apply bitwise not to invert the label
         mask = cv2.bitwise_not(mask)
 
-        # Apply the mask to the original image to remove the detected lines
+        # Apply the label to the original image to remove the detected lines
         result = cv2.bitwise_and(image, image, mask=mask)
 
         # Return the image with straight lines removed

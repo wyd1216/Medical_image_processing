@@ -30,6 +30,7 @@ __pycache__/
 # Environments
 .env
 .venv
+.DS_Store
 env/
 venv/
 ENV/

@@ -5,15 +5,19 @@ import cv2
 import pathlib
 import time
 import shutil
+import copy
+import pydicom
 import numpy as np
 import SimpleITK as sitk
 import matplotlib.pyplot as plt
+import pandas as pd
 from scipy import ndimage
 from natsort import os_sorted
 from skimage import morphology
 from tqdm import tqdm, trange
 from PIL import Image
 from natsort import os_sorted
+from scipy import ndimage
 from .util import multi_image_show
 
 '''
@@ -29,6 +33,323 @@ Copyright (c) 2022 by Yudong Wang yudongwang117@icloud.com, All Rights Reserved.
 
 plt.clf()
 plt.style.use(pathlib.Path(__file__).parent / 'mplstyle' / 'wydplot.mplstyle')
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# ------------------------|   medical Image Processing by SimpleITK                  |--------------------------------
+# --------------------------------------------------------------------------------------------------------------------
+def sitk_normalize_image(image, vmin=None, vmax=None):
+    """
+    Normalize a 3D image to the key 0-255.
+
+    Args:
+        image (sitk.Image): 3D image to normalize.
+
+    Returns:
+        sitk.Image: Normalized 3D image.
+        float: The original minimum pixel value of the image.
+        float: The original key (maximum - minimum) of the image.
+    """
+    image_min = vmin if vmin else sitk.GetArrayViewFromImage(image).min()
+    image_max = vmax if vmax else sitk.GetArrayViewFromImage(image).max()
+    normalized_image = sitk.Cast(sitk.RescaleIntensity(image, outputMinimum=0, outputMaximum=255), sitk.sitkUInt8)
+    return normalized_image, image_min, image_max
+
+
+def sitk_recover_image(normalized_image, original_min, original_max, pixel_type=sitk.sitkInt16):
+    """
+    Recover the original image values from a normalized image.
+
+    Args:
+        normalized_image (sitk.Image): Normalized 3D image.
+        original_min (float): The original minimum pixel value of the image.
+        original_range (float): The original key (maximum - minimum) of the image.
+
+    Returns:
+        sitk.Image: Recovered 3D image with the original pixel values.
+    """
+    recovered_image = sitk.Cast(sitk.RescaleIntensity(normalized_image, outputMinimum=original_min,
+                                                      outputMaximum=original_max), pixel_type)
+    return recovered_image
+
+
+def sitk_get_nth_largest_connected_component(image, n=1, exclude_value=None, full_connected=True, extract_box=False,
+                                             key='size'):
+    """
+    Extract the nth largest connected component from a 3D image, excluding a specific pixel value.
+
+    Args:
+        image (sitk.Image): 3D image to process.
+        n (int): The rank of the connected component to extract (1 for the largest, 2 for the second largest, etc.).
+        exclude_value (int, optional): Pixel value to exclude from the analysis.
+        full_connected (bool) : True: Use 26-connectivity of 3D and 8-connectivity of 2D. False: use 6-connectivity of
+            3D and 4-connectivity of 2D.
+        size_nth: if we choose key = mean, median .. to guard the size is not too small, the rank of size is demand.
+
+    Returns:
+        sitk.Image: 3D mask containing only the nth largest connected component.
+    """
+
+    # Threshold the image to exclude the specific pixel value, if provided
+    if exclude_value is not None:
+        binary_image = sitk.BinaryThreshold(image, lowerThreshold=exclude_value + 1, upperThreshold=255)
+    else:
+        binary_image = sitk.BinaryThreshold(image, lowerThreshold=1, upperThreshold=255)
+
+    ccfilter = sitk.ConnectedComponentImageFilter()
+    ccfilter.SetFullyConnected(full_connected)
+    connected_components = ccfilter.Execute(binary_image)
+
+    # Apply label shape statistics filter to get information about each connected component
+    label_shape_filter = sitk.LabelShapeStatisticsImageFilter()
+    label_shape_filter.Execute(connected_components)
+
+    if key == 'size':
+        # Get a list of labels sorted by the size of their connected components (largest to smallest)
+        sorted_labels = sorted(label_shape_filter.GetLabels(),
+                               key=lambda label: label_shape_filter.GetNumberOfPixels(label), reverse=True)
+
+    elif key == 'mean':
+        # The brightness is equal to the sum of pixel value.
+        intensity_stats_filter = sitk.LabelIntensityStatisticsImageFilter()
+        intensity_stats_filter.Execute(connected_components, image)
+        # Get a list of labels sorted by the size of their connected components (largest to smallest)
+
+        sorted_labels = sorted(intensity_stats_filter.GetLabels(),
+                               key=lambda label: intensity_stats_filter.GetMean(label), reverse=True)
+        sum_sorted_labels = sorted(intensity_stats_filter.GetLabels(),
+                                   key=lambda label: intensity_stats_filter.GetSum(label), reverse=True)
+        sum_maximum = intensity_stats_filter.GetSum(sum_sorted_labels[0])
+        sorted_sum = [intensity_stats_filter.GetSum(label) for label in sorted_labels]
+        sorted_labels = [label for label in sorted_labels if intensity_stats_filter.GetSum(label) / sum_maximum > 0.3]
+
+    # Find the label of the nth largest connected component
+    if n <= len(sorted_labels):
+        target_label = sorted_labels[n - 1]
+    else:
+        print(
+            f'Warning: Only {len(sorted_labels)} connected components exist, but {n}-th is chosen. The smallest one will be extracted')
+        target_label = sorted_labels[-1]
+
+    # Create a binary image containing only the nth largest connected component
+    target_component = sitk.BinaryThreshold(connected_components, lowerThreshold=target_label,
+                                            upperThreshold=target_label)
+    if extract_box:
+        # shape_filter = sitk.LabelShapeStatisticsImageFilter()
+        # shape_filter.Execute(target_component)
+        # bbox = shape_filter.GetBoundingBox(1)
+        bbox = label_shape_filter.GetBoundingBox(target_label)
+        target_component = create_image_with_bbox(target_component.GetSize(), bbox)
+        target_component.CopyInformation(image)
+
+    return target_component
+
+
+def create_image_with_bbox(shape, bbox):
+    # Create a black image of the desired size
+    image = sitk.Image(shape, sitk.sitkUInt8, 1)
+
+    # Create a box image
+    box_size = [bbox[i] for i in range(3, 6)]
+    box_image = sitk.Image(box_size, sitk.sitkUInt8, 1)
+    box_image[:, :, :] = 1
+
+    # Paste the box image into the original image
+    paste_filter = sitk.PasteImageFilter()
+    paste_filter.SetSourceSize(box_size)
+    paste_filter.SetSourceIndex((0, 0, 0))
+    paste_filter.SetDestinationIndex(bbox[:3])
+    pasted_image = paste_filter.Execute(image, box_image)
+    return pasted_image
+
+
+def sitk_extract_box(image: sitk.Image, bbox: tuple, crop=False):
+    if crop:
+        extract_image = sitk_crop_bbox(image, bbox)
+    else:
+        dimension = image.GetDimension()
+        extract_image = sitk_extract_box_2d(image, bbox) if dimension == 2 \
+            else sitk_extract_box_3d(image, bbox)
+
+    return extract_image
+
+
+def sitk_extract_box_2d(input_image: sitk.Image, bbox: tuple) -> sitk.Image:
+    """
+    Extract a 2D region from a SimpleITK image using a bounding box.
+
+    Args:
+        input_image (sitk.Image): The input 2D SimpleITK image.
+        bbox (tuple): A tuple with four elements (min_x, min_y, size_x, size_y) representing
+                              the bounding box.
+
+    Returns:
+        sitk.Image: The extracted 2D region as a SimpleITK image.
+    """
+
+    # Convert the input SimpleITK image to a NumPy array
+    image_array = sitk.GetArrayFromImage(input_image)
+
+    # Create a binary mask of the same size as the input image with all elements set to 0
+    mask_array = np.zeros(image_array.shape, dtype=np.uint8)
+
+    # Set the elements inside the bounding box to 1
+    mask_array[bbox[1]:bbox[1] + bbox[3],
+    bbox[0]:bbox[0] + bbox[2]] = 1
+
+    # Multiply the input image array by the mask array to extract the region
+    extract_array = image_array * mask_array
+
+    # Convert the resulting NumPy array back to a SimpleITK image and match the input image's metadata
+    extract_image = sitk.GetImageFromArray(extract_array)
+    extract_image.CopyInformation(input_image)
+
+    # Return the extracted image
+    return extract_image
+
+
+def sitk_extract_box_3d(input_image: sitk.Image, bbox: tuple) -> sitk.Image:
+    """
+    Extract a 3D region from a SimpleITK image using a bounding box.
+
+    Args:
+        input_image (sitk.Image): The input 3D SimpleITK image.
+        bbox (tuple): A tuple with six elements (min_x, min_y, min_z, size_x, size_y, size_z) representing
+                              the bounding box.
+
+    Returns:
+        sitk.Image: The extracted 3D region as a SimpleITK image.
+    """
+
+    # Convert the input SimpleITK image to a NumPy array
+    image_array = sitk.GetArrayFromImage(input_image)
+
+    # Create a binary mask of the same size as the input image with all elements set to 0
+    mask_array = np.zeros(image_array.shape, dtype=np.uint8)
+
+    # Set the elements inside the bounding box to 1
+    mask_array[bbox[2]:bbox[2] + bbox[5],
+    bbox[1]:bbox[1] + bbox[4],
+    bbox[0]:bbox[0] + bbox[3]] = 1
+
+    # Multiply the input image array by the mask array to extract the region
+    extract_array = image_array * mask_array
+
+    # Convert the resulting NumPy array back to a SimpleITK image and match the input image's metadata
+    extract_image = sitk.GetImageFromArray(extract_array)
+    extract_image.CopyInformation(input_image)
+
+    # Return the extracted image
+    return extract_image
+
+
+def sitk_get_fg_bbox(image, bg_value=None):
+    """
+    Get the bounding box of the foreground in a SimpleITK image.
+
+    Args:
+        image (SimpleITK.Image): The input image.
+        bg_value (float, optional): The background value. Defaults to the minimum value in the image.
+
+    Returns:
+        tuple: The bounding box containing all non-background pixels.
+               For 3D images: (start_x, start_y, start_z, size_x, size_y, size_z)
+               For 2D images: (start_x, start_y, size_x, size_y)
+    """
+    # Convert the SimpleITK image to a NumPy array
+    image_np = sitk.GetArrayFromImage(image)
+
+    # Set the background value to the minimum pixel value in the image if not provided
+    if bg_value is None:
+        bg_value = np.min(image_np)
+
+    # Find the indices of non-background pixels
+    non_bg_indices = np.nonzero(image_np != bg_value)
+
+    # Get the minimum and maximum indices for each dimension
+    min_z, max_z = (0, 0) if image.GetDimension() == 2 else (np.min(non_bg_indices[0]), np.max(non_bg_indices[0]))
+    min_y, max_y = np.min(non_bg_indices[-2]), np.max(non_bg_indices[-2])
+    min_x, max_x = np.min(non_bg_indices[-1]), np.max(non_bg_indices[-1])
+
+    # Calculate the size of the bounding box in each dimension
+    size_z = max_z - min_z + 1 if image.GetDimension() == 3 else 0
+    size_y = max_y - min_y + 1
+    size_x = max_x - min_x + 1
+
+    # Create the bounding box as a tuple
+    if image.GetDimension() == 3:
+        bbox = (min_x, min_y, min_z, size_x, size_y, size_z)
+    else:
+        bbox = (min_x, min_y, size_x, size_y)
+
+    # Convert the bounding box elements to integers
+    bbox = tuple(int(x) for x in bbox)
+
+    return bbox
+
+
+def sitk_crop_bbox(image: sitk.Image, bbox: tuple) -> sitk.Image:
+    """
+    Crop a SimpleITK image using the given bounding box.
+
+    Args:
+        image (sitk.Image): The input image.
+        bbox (tuple): The bounding box used to crop the image.
+                      For 3D images: (start_x, start_y, start_z, size_x, size_y, size_z)
+                      For 2D images: (start_x, start_y, size_x, size_y)
+
+    Returns:
+        sitk.Image: The cropped image.
+    """
+    # Create an instance of the RegionOfInterestImageFilter
+    roi_filter = sitk.RegionOfInterestImageFilter()
+
+    # Set the starting index of the region of interest
+    roi_filter.SetIndex(bbox[:image.GetDimension()])
+
+    # Set the size of the region of interest
+    roi_filter.SetSize(bbox[image.GetDimension():])
+
+    # Apply the filter to the input image to extract the region of interest
+    cropped_image = roi_filter.Execute(image)
+
+    # Return the cropped image
+    return cropped_image
+
+
+def sitk_pad_image(image, pad_width=(0, 0), pad_height=(0, 0), pad_depth=None, constant_value=0):
+    """
+    Pads a 2D or 3D medical image with a constant value along specified dimensions.
+
+    Args:
+        image (SimpleITK.Image): The input image.
+        pad_width (tuple): The padding size (before, after) along the width (x-axis).
+        pad_height (tuple): The padding size (before, after) along the height (y-axis).
+        pad_depth (tuple, optional): The padding size (before, after) along the depth (z-axis) for 3D images.
+        constant_value (int, float): The constant value used for padding.
+
+    Returns:
+        SimpleITK.Image: The padded image.
+    """
+    pad_width = (pad_width, pad_width) if isinstance(pad_width, (int, float)) else pad_width
+    pad_height = (pad_height, pad_height) if isinstance(pad_height, (int, float)) else pad_height
+    pad_depth = (0, 0) if pad_depth is None else pad_depth
+    pad_depth = (pad_depth, pad_depth) if isinstance(pad_depth, (int, float)) else pad_depth
+    pad_filter = sitk.ConstantPadImageFilter()
+
+    if image.GetDimension() == 2:
+        pad_filter.SetPadLowerBound([pad_width[0], pad_height[0]])
+        pad_filter.SetPadUpperBound([pad_width[1], pad_height[1]])
+    elif image.GetDimension() == 3:
+        if pad_depth is None:
+            raise ValueError("pad_depth must be provided for 3D images")
+        pad_filter.SetPadLowerBound([pad_width[0], pad_height[0], pad_depth[0]])
+        pad_filter.SetPadUpperBound([pad_width[1], pad_height[1], pad_depth[1]])
+    else:
+        raise ValueError("Unsupported image dimension")
+
+    pad_filter.SetConstant(constant_value)
+    return pad_filter.Execute(image)
 
 
 # -----
@@ -352,7 +673,8 @@ def cvt_nifti2dicom(new_img, out_dir, meta_data=None):
                              ("0008|0021", modification_date),  # Series Date
                              ("0008|0008", "DERIVED\\SECONDARY"),  # Image Type
                              (
-                             "0020|000e", "1.2.826.0.1.3680043.2.1125." + modification_date + ".1" + modification_time),
+                                 "0020|000e",
+                                 "1.2.826.0.1.3680043.2.1125." + modification_date + ".1" + modification_time),
                              # Series Instance UID
                              ("0020|0037", '\\'.join(
                                  map(str, (direction[0], direction[3], direction[6],  # Image Orientation (Patient)
@@ -392,12 +714,12 @@ def writeSlices(series_tag_values, new_img, i, out_dir):
 def fusion_image_mask(image, mask):
     '''
     param example_image: np.array dtypes=uint8, np.array 2D
-    param mask: np.array dtypes=uint8, np.array 2D
+    param label: np.array dtypes=uint8, np.array 2D
     param color_map: int, 0-12
     return fusion_image.
     '''
     pixel_values = [x for x in np.unique(mask) if x != 0]
-    # Uniform gray mask. From shape=(w, h) to (w, h, 3)
+    # Uniform gray label. From shape=(w, h) to (w, h, 3)
     mask_uniform = np.select([mask > 0], [1], default=0).astype('uint8')
     mask_gray = cv2.cvtColor(mask_uniform, cv2.COLOR_BGR2RGB)
 
@@ -410,14 +732,14 @@ def fusion_image_mask(image, mask):
     for pixel in pixel_values:
         single_mask = np.select([mask == pixel], [pixel],
                                 default=0).astype('uint8')
-        # Extract the mask in example_image
+        # Extract the label in example_image
         single_mask = single_mask // pixel
         color_ind = pixel % 12
         single_roi = image * single_mask
         # Convert 3D-roi by apply color map
         single_rgb_roi = cv2.applyColorMap(single_roi, color_ind)
         # Zero-region of roi maybe get non-zero value after convert to
-        # RGB. multiply it by converted RGB-mask to reset it zero.
+        # RGB. multiply it by converted RGB-label to reset it zero.
         single_mask_gray = cv2.cvtColor(single_mask, cv2.COLOR_BGR2RGB)
         single_rgb_roi = single_rgb_roi * single_mask_gray
         roi_list.append(single_rgb_roi)
@@ -448,8 +770,8 @@ def array2png(array, savepath, low_window, high_window):
     """
     array: np.array,
     savepath: str, the name of saved new img.
-    low_window: min value of img
-    high_window: max value of img
+    low_window: vmin value of img
+    high_window: vmax value of img
     """
     new_array = image_convert_uint8(array, low_window=low_window, high_window=high_window)
     # 其中0代表图片保存时的压缩程度，有0-9这个范围的10个等级，数字越大表示压缩程度越高。
@@ -530,7 +852,7 @@ def array3d2png(array3d, slice_indices, savepath, low_window, high_window):
 ##method1 --opencv
 def get_largest_connect_component1(img):
     """
-    Get the mask of largest connect component.
+    Get the label of largest connect component.
 
     Parameters
     ----------
@@ -539,7 +861,7 @@ def get_largest_connect_component1(img):
 
     Returns:
         tuple = (float, np.array)
-        The area of largest connect component and the mask.
+        The area of largest connect component and the label.
     """
     # rgb->gray
     if len(img.shape) == 3:
@@ -591,6 +913,31 @@ def getmaxcomponent(mask_array, num_limit=10):
     maxcomponent = np.array((labeled_img == max_label)).astype(np.uint8)
     # print(str(max_label) + ' num:' + str(max_num))  # 看第几个是最大的
     return maxcomponent
+
+
+def get_largest_connected_domain(image):
+    """
+    Returns the largest connected domain of a 3D binary image.
+
+    Args:
+        image (numpy.array): A 3D binary image.
+
+    Returns:
+        numpy.array: A 3D binary image containing the largest connected domain.
+    """
+    # Label connected components in the 3D image
+    labeled_image, num_features = ndimage.label(image)
+
+    # Measure the size of each connected component
+    sizes = ndimage.sum(image, labeled_image, range(num_features + 1))
+
+    # Find the label of the largest connected domain
+    max_label = np.argmax(sizes)
+
+    # Create a binary image with the largest connected domain
+    largest_connected_domain = (labeled_image == max_label)
+
+    return largest_connected_domain
 
 
 def get_body(CT_nii_array):
@@ -656,9 +1003,9 @@ def get_largest_contour_region(array2d):
     return mask
 
 
-class MedicalImageProcessing:
+class MedicalImageProcessor:
 
-    def __init__(self, image, mask=None):
+    def __init__(self, image, label=None):
         """
         Class to read sitk.Image and make processing.
 
@@ -666,26 +1013,36 @@ class MedicalImageProcessing:
         ----------
         image: str or sitk.Image
             The input img array in 2D or 3D. If 2D, shape is (h, w), if 3D, shape is (h, w, c).
-        mask: str, sitk.Image or None, default None
+        label: str, sitk.Image or None, default None
 
         window_center_width: tuple(center, width), default None
-            If None, then set the pixel value range by the original.
+            If None, then set the pixel value key by the original.
             else, set by (center - width//2, center + width // 2)
         """
-        # Load sitk example_image
-        self._image = load_image(image)
+        # Load base information
+        self._sitk_image = load_image(image)
         image_reader = get_meta_reader(image)
-        self._image_meta = load_metadata(image_reader)
-        if mask:
-            self._mask = load_image(mask)
-            self._mask_meta = load_metadata(self._mask)
-            self._mask.CopyInformation(self._image)
+        self._meta_data = load_metadata(image_reader)
+
+        # label_type: 0:None, 1: int, float, 2: sitk_image
+        if label is None:
+            self._label = None
+            self._label_type = 0
+        elif isinstance(label, (int, float)):
+            self._label = label
+            self._label_type = 1
         else:
-            self._mask = None
-            self._mask_meta = {}
+            self._label = load_image(label)
+            self._label.CopyInformation(self._sitk_image)
+            self._label_type = 2
+
+        # Normalize
+        self._origin_min = None
+        self._origin_max = None
+        self._origin_type = self._sitk_image.GetPixelIDValue()
 
         # Get number of series slices.
-        image_array = sitk.GetArrayFromImage(self._image)
+        image_array = sitk.GetArrayFromImage(self._sitk_image)
         self._low_window = np.min(image_array)
         self._high_window = np.max(image_array)
 
@@ -694,11 +1051,11 @@ class MedicalImageProcessing:
                           is_masked=False,
                           savefig=None):
         """
-        Plots a single slice of the image, with or without mask, and saves the plot to file if specified.
+        Plots a single slice of the image, with or without label, and saves the plot to file if specified.
 
         Args:
             slice_num (int): the index of the slice to plot, default -1 (middle slice).
-            is_masked (bool): whether to plot the mask overlay on the image, default False.
+            is_masked (bool): whether to plot the label overlay on the image, default False.
             savefig (str): the file name to save the plot to, default None.
 
         Returns:
@@ -715,43 +1072,44 @@ class MedicalImageProcessing:
             slice_num = channel_num // 2
 
         # Get the image array and the slice to plot
-        image_array = sitk.GetArrayFromImage(self._image)
+        image_array = sitk.GetArrayFromImage(self._sitk_image)
         image_slice = image_array[slice_num]
 
         # Convert the image to uint8
         image_slice = image_convert_uint8(image_slice, self._low_window, self._high_window)
 
-        # If masked, get the mask array and the masked slice
-        if not self._mask:
+        # If masked, get the label array and the masked slice
+        if not self._label:
             is_masked = False
         if is_masked:
-            mask_array = sitk.GetArrayFromImage(self._mask)
+            mask_array = sitk.GetArrayFromImage(self._label)
             mask_slice = mask_array[slice_num].astype('uint8')
             fusion_slice = fusion_image_mask(image_slice, mask_slice)
         else:
             fusion_slice = image_slice
 
-        fig, ax = multi_image_show(np.array([image_slice, fusion_slice]))
+        fig, ax = multi_image_show(np.array([fusion_slice]))
 
         # # Save the plot to file (if applicable) and return the plot axis object
         if savefig:
             plt.savefig(savefig)
         return ax
 
-    def plot_multi_slices(self, is_masked=True, savefig=None):
-        img_array = sitk.GetArrayFromImage(self._image)
-        if not self._mask:
-            is_masked = False
-        if is_masked:
-            mask_array = sitk.GetArrayFromImage(self._mask)
+    def plot_multi_slices(self, num=None, savefig=None):
+        img_array = sitk.GetArrayFromImage(self._sitk_image)
+        if self._label_type == 2:
+            mask_array = sitk.GetArrayFromImage(self._label)
             img_array, mask_array, fusion_array = get_masked_slices(img_array, mask_array)
-        if is_masked:
             plot_array = fusion_array
         else:
             plot_array = img_array
+        if num:
+            if len(plot_array) > num:
+                plot_array = plot_array[(len(plot_array) - num) // 2: (len(plot_array) + num) // 2]
         multi_image_show(plot_array, cols=4)
         if savefig:
             plt.savefig(savefig)
+
     # Optimized above
 
     def saveimg(self, savepath, format='nii', meta_data=True):
@@ -761,7 +1119,8 @@ class MedicalImageProcessing:
             savepath (_type_): _description_
             format (str, optional): _description_. Defaults to 'nii'.
         """
-        image = write_metadata(self._image, self._image_meta)
+        # image = write_metadata(self._sitk_image, self._meta_data)
+        image = self._sitk_image
         if format == 'nii':
             sitk.WriteImage(image, savepath, useCompression=True)
         elif format == 'nrrd':
@@ -775,7 +1134,7 @@ class MedicalImageProcessing:
                 shutil.rmtree(savepath)
             savepath.mkdir(parents=True, exist_ok=True)
             if meta_data:
-                cvt_nifti2dicom(image, savepath, meta_data=self._image_meta)
+                cvt_nifti2dicom(image, savepath, meta_data=self._meta_data)
             else:
                 cvt_nifti2dicom(image, savepath)
 
@@ -786,26 +1145,23 @@ class MedicalImageProcessing:
             saved_path (_type_): _description_
             format (str, optional): _description_. Defaults to 'nii'.
         """
-        # self._mask = write_metadata(self._mask, self._mask_meta)
         if format == 'nii':
-            sitk.WriteImage(self._mask, savepath, useCompression=True)
+            sitk.WriteImage(self._label, savepath, useCompression=True)
         elif format == 'nrrd':
-            sitk.WriteImage(self._mask, savepath, useCompression=True)
+            sitk.WriteImage(self._label, savepath, useCompression=True)
         elif format == 'npy':
-            img_array = sitk.GetArrayFromImage(self._mask)
+            img_array = sitk.GetArrayFromImage(self._label)
             np.save(savepath, img_array)
         elif format == 'dcm':
             savepath = pathlib.Path(savepath)
             if savepath.exists():
                 shutil.rmtree(savepath)
             savepath.mkdir(parents=True, exist_ok=True)
-            cvt_nifti2dicom(self._mask, savepath, meta_data=self._image_meta)
-
-
+            cvt_nifti2dicom(self._label, savepath, meta_data=self._meta_data)
 
     def get_masked_indices(self, pixel_value=None):
-        if self._mask:
-            mask_array = sitk.GetArrayFromImage(self._mask)
+        if not isinstance(self._label, (int, float)):
+            mask_array = sitk.GetArrayFromImage(self._label)
             if pixel_value is not None:
                 mask_array = np.select([mask_array == pixel_value],
                                        [pixel_value],
@@ -821,15 +1177,15 @@ class MedicalImageProcessing:
             index = indices[len(indices) // 2]
         else:
             index = -1
-        image_array = sitk.GetArrayFromImage(self._image)
+        image_array = sitk.GetArrayFromImage(self._sitk_image)
         png_paths = array3d2png(image_array, slice_indices=[index], savepath=savepath, low_window=self._low_window,
                                 high_window=self._high_window)
         png_path = png_paths[0]
         return index, png_path
 
     def generate_hcc_tmp(self, index, savepath):
-        image_array = sitk.GetArrayFromImage(self._image)
-        mask_array = sitk.GetArrayFromImage(self._mask)
+        image_array = sitk.GetArrayFromImage(self._sitk_image)
+        mask_array = sitk.GetArrayFromImage(self._label)
         image2d = image_array[index]
         mask2d = mask_array[index]
         mask2d = np.select([mask2d > 0], [1])
@@ -852,94 +1208,94 @@ class MedicalImageProcessing:
 
     def reset_window(self, win_center_width):
         # Adjust the image window using dicom_window_adjust with win_center and win_width values
-        # Update the _image variable with the adjusted image
-        # Pass _image_meta as the metadata parameter to write_metadata function
+        # Update the _sitk_image variable with the adjusted image
+        # Pass _meta_data as the metadata parameter to write_metadata function
         win_center, win_width = win_center_width
-        self._image = write_metadata(dicom_window_adjust(self._image,
-                                                         wincenter=win_center,
-                                                         winwidth=win_width),
-                                     self._image_meta)
+        self._sitk_image = write_metadata(dicom_window_adjust(self._sitk_image,
+                                                              wincenter=win_center,
+                                                              winwidth=win_width),
+                                          self._meta_data)
 
-    #     def get_largest_connect_area(self):
-    #         array = sitk.GetArrayFromImage(self._image)
-    #         masked_image_array, masked_mask_array, indices = self.get_masked_array()
-    #         array_mask = get_body(masked_image_array)
-    #         array2d = array_mask[0]
-    #         max_area, array2d = get_largest_connect_component1(array2d)
-    #         nonzero = np.nonzero(array2d)
-    #         x_min, x_max, y_min, y_max = np.min(nonzero[0]), np.max(nonzero[0]), np.min(nonzero[1]), np.max(nonzero[1])
-    #         # x_min, x_max, y_min, y_max = x_min - 5, x_max + 5, y_min - 5, y_max + 5
-    #
-    #         array3d = np.array([array2d for x in range(len(array))])
-    #
-    #         # 这里注意不能直接乘上mask，因为dicom image最小元素为-1024而不是0.
-    #         array_new = np.select([array3d==0],[np.min(array)], default=array)
-    #
-    #         array_new1 = array.copy()
-    #         array_new1[:, :x_min, :] = np.min(array)
-    #         array_new1[:, x_max:, :] = np.min(array)
-    #         array_new1[:, :, :y_min] = np.min(array)
-    #         array_new1[:, :, y_max:] = np.min(array)
-    #
-    #         # extract_array = array[x_min:x_max, y_min:y_max]
-    #
-    #         sitk_image = sitk.GetImageFromArray(array_new1)
-    #         sitk_image.CopyInformation(self._image)
-    #         self._image = sitk_image
+    def normalize(self, vmin=None, vmax=None):
+        '''Normalize the image into 0-255'''
+        if not self._origin_max:
+            sitk_image, image_min, image_max = sitk_normalize_image(self._sitk_image, vmin, vmax)
+            self._sitk_image = sitk_image
+            self._origin_min = image_min
+            self._origin_max = image_max
 
-    def get_largest_connect_area(self):
-        image_array = sitk.GetArrayFromImage(self._image)
+    def recover(self):
+        if self._origin_min:
+            self._sitk_image = sitk_recover_image(self._sitk_image, original_min=self._origin_min,
+                                                  original_max=self._origin_max, type=self._origin_type)
+            self._origin_max = None
+            self._origin_min = None
 
-        # Select the masked slices to get connect region.
-        indices = self.get_masked_indices()
-        if indices:
-            masked_image_array = image_array[indices]
-        else:
-            masked_image_array = image_array
+    def get_largest_connectivity(self, n=1, exclude_value=None, method='sitk', extract_box=False, key='size'):
+        sitk_image = self._sitk_image
+        if method == 'sitk':
+            # Normalize first
+            # sitk_image, _, _ = sitk_normalize_image(sitk_image)
+            sitk_mask = sitk_get_nth_largest_connected_component(sitk_image, n, exclude_value, extract_box=extract_box,
+                                                                 key=key)
+        # Apply the binary image as a mask to the original image
+        extract_sitk_image = sitk.Mask(sitk_image, sitk_mask)
+        # extract_sitk_image = sitk_mask
 
-        # Get the largest masked region
-        array_mask = get_body(masked_image_array)
-        # array3d = np.array([get_largest_connect_component1(x)[1] for x in array_mask])
-        # array2d = np.sum(array3d, axis=0)
+        # extract_sitk_image.CopyInformation(sitk_image)
+        self._sitk_image = extract_sitk_image
 
-        # Again Get the largest region of the mask.
-        # array2d = get_largest_connect_component1(array_mask[0])[1]
-        array2d = array_mask[0]
-        array2d = image_convert_uint8(array2d, np.min(array2d), np.max(array2d))
+    def crop(self, padding=None):
+        '''
 
-        # Fill the region of largest contour and return the final mask.
-        array2d = get_largest_contour_region(array2d)
-        array3d = np.array([array2d for x in range(len(image_array))])
+        :param size: first, crop the box where the background is not zero. if None, then complete. If int, the crop
+                     the center value base on the size, if the crop size is larger than the figure size, then do nothing
+                     or padding the bounding according to the padding.
+        :param padding: if True, then padding the boudary if the crop size if larger than figure size.
+        :return:
+        '''
+        bbox = sitk_get_fg_bbox(self._sitk_image)
+        self._sitk_image = sitk_crop_bbox(self._sitk_image, bbox)
+        if self._label_type == 2:
+            self._label = sitk_crop_bbox(self._label, bbox)
+        return bbox
 
-        # 这里注意不能直接乘上mask，因为dicom image最小元素为-1024而不是0.
-        array_new = np.select([array3d == 0], [np.min(image_array)], default=image_array)
-        sitk_image = sitk.GetImageFromArray(array_new)
-        sitk_image.CopyInformation(self._image)
-        self._image = sitk_image
+    def square_pad(self, size=None):
+        sitk_size = self._sitk_image.GetSize()
+        max_dim = max(sitk_size[:2])
+        if size is None or size <= max_dim:
+            size = max_dim
+        pad_width = (size - sitk_size[0]) // 2
+        pad_height = (size - sitk_size[1]) // 2
+        pad_width = (pad_width, size - sitk_size[0] - pad_width)
+        pad_height = (pad_height, size - sitk_size[1] - pad_height)
+        self._sitk_image = sitk_pad_image(self._sitk_image, pad_width=pad_width, pad_height=pad_height)
+        if self._label_type == 2:
+            self.label = sitk_pad_image(self.label, pad_width=pad_width, pad_height=pad_height)
 
-    def resample_spacing(self, out_spacing=[1, 1, 1]):
-        self._image = sitk_resample_spacing(self._image, is_label=False, out_spacing=out_spacing)
-        self._image = write_metadata(self._image, self._image_meta)
-        if self._mask:
-            self._mask = sitk_resample_spacing(self._mask, is_label=True,
-                                               out_spacing=out_spacing)
-            self._mask = write_metadata(self._mask, self._image_meta)
+    def resample_spacing(self, out_spacing=(1, 1, 1)):
+        self._sitk_image = sitk_resample_spacing(self._sitk_image, is_label=False, out_spacing=out_spacing)
+        self._sitk_image = write_metadata(self._sitk_image, self._meta_data)
+        if self._label_type == 2:
+            self._label = sitk_resample_spacing(self._label, is_label=True,
+                                                out_spacing=out_spacing)
+            # self._label = write_metadata(self._label, self._meta_data)
 
-        # Check addtional slices
-        masked_indices = self.get_masked_indices()
-        if masked_indices[-1] - masked_indices[0] + 1 != len(masked_indices):
-            image = remove_shell(self._image)
-            self._image = write_metadata(image, self._image_meta)
-            if self._mask:
-                mask = remove_shell(self._mask)
-                self._mask = write_metadata(mask, self._image_meta)
+        # # Check addtional slices
+        # masked_indices = self.get_masked_indices()
+        # if masked_indices[-1] - masked_indices[0] + 1 != len(masked_indices):
+        #     image = remove_shell(self._sitk_image)
+        #     self._sitk_image = write_metadata(image, self._meta_data)
+        #     if self._label
+        #         mask = remove_shell(self._label)
+        #         self._label = write_metadata(mask, self._meta_data)
 
     def get_info(self):
-        if self._mask is None:
-            print('None mask information')
-            tmp_sitk = self._image
+        if self._label is None:
+            print('None label information')
+            tmp_sitk = self._sitk_image
         else:
-            tmp_sitk = self._mask
+            tmp_sitk = self._label
         # The slice_end is used to store the multi-roi label infomation for inferscholar.
         keys = [key for key in load_metadata(tmp_sitk).keys()]
         if 'slice_end' in keys:
@@ -952,7 +1308,7 @@ class MedicalImageProcessing:
         stats.Execute(tmp_sitk)
         # num_ins = stats.GetLabels()
         info_list = []
-        if self._mask is None:
+        if self._label is None:
             labels = [1]
         else:
             labels = stats.GetLabels()
@@ -992,12 +1348,12 @@ class MedicalImageProcessing:
             info_list.append(info_dict)
         return info_list
 
-    def get_base_info(self, mask_val=-1):
+    def get_mask_base_info(self, mask_val=-1):
         info_dict = {}
-        info_dict['size'] = tuple(reversed(self._image.GetSize()))
-        info_dict['spacing'] = tuple(reversed([round(x, 2) for x in (self._image).GetSpacing()]))
+        info_dict['size'] = tuple(reversed(self._sitk_image.GetSize()))
+        info_dict['spacing'] = tuple(reversed([round(x, 2) for x in (self._sitk_image).GetSpacing()]))
 
-        image_array = sitk.GetArrayFromImage(self._image)
+        image_array = sitk.GetArrayFromImage(self._sitk_image)
         img_min = np.min(image_array)
         image_array = np.select([image_array > img_min + 10], [1], default=0)
         image_nonzero = np.nonzero(image_array)
@@ -1007,7 +1363,7 @@ class MedicalImageProcessing:
         info_dict['image_low'] = image_low
         info_dict['image_bias'] = image_bias
 
-        mask_array = sitk.GetArrayFromImage(self._mask)
+        mask_array = sitk.GetArrayFromImage(self._label)
         if mask_val != -1:
             mask_array = np.select([mask_array == mask_val], [1], default=0)
         else:
@@ -1024,15 +1380,15 @@ class MedicalImageProcessing:
         return info_dict
 
     def get_metainfo(self, tag):
-        if tag in self._image_meta.keys():
-            value = self._image_meta[tag]
+        if tag in self._meta_data.keys():
+            value = self._meta_data[tag]
         else:
             value = None
         return value
 
     def get_masked_array(self, pixel_value=None):
-        image_array = sitk.GetArrayFromImage(self._image)
-        mask_array = sitk.GetArrayFromImage(self._mask)
+        image_array = sitk.GetArrayFromImage(self._sitk_image)
+        mask_array = sitk.GetArrayFromImage(self._label)
         indices = self.get_masked_indices(pixel_value=pixel_value)
         if indices[-1] - indices[0] != len(indices) - 1:
             print('Not a contiguous array for the masked indices')
@@ -1043,36 +1399,58 @@ class MedicalImageProcessing:
                                       default=0)
         return masked_image_array, masked_mask_array, indices
 
-    def print_meta_info(self):
-        for key, value in self._image_meta.items():
-            print(key, ':', value)
+    def metadata_info(self):
+        meta_dict = {'Tag': [], 'Value': []}
+        for key, value in self._meta_data.items():
+            meta_dict['Tag'].append(key)
+            meta_dict['Value'].append(value)
+        return pd.DataFrame(meta_dict)
 
-    def print_info(self):
-        print('spacing : ', self.spacing)
-        print('size : ', self.size)
-        print('direction : ', self._image.GetDirection())
-        print('origin: ', self._image.GetOrigin())
-        array = sitk.GetArrayFromImage(self._image)
+    def get_base_info(self):
+        array = sitk.GetArrayFromImage(self._sitk_image)
         pixel_min, pixel_max = np.min(array), np.max(array)
-        print('pixel value range : ', (pixel_min, pixel_max))
+        # print('spacing : ', self.spacing)
+        # print('size : ', self.size)
+        # print('direction : ', self._sitk_image.GetDirection())
+        # print('origin: ', self._sitk_image.GetOrigin())
+        # print('pixel value key : ', (pixel_min, pixel_max))
+        direction = tuple(round(x, 3) for x in self._sitk_image.GetDirection())
+        info_dict = {'spacing': self.spacing,
+                     'size': self.size,
+                     'direction': direction,
+                     'origin': self._sitk_image.GetOrigin(),
+                     'pixel value key': (pixel_min, pixel_max),
+                     }
+        index = info_dict.keys()
+        value = info_dict.values()
+        info_df = pd.DataFrame({'Property': index, 'Value': value})
+        return info_df
+
+    def get_metadata(self):
+        return self._meta_data
+
+    def get_sitk_image(self):
+        return self._sitk_image
 
     @property
     def image(self):
-        return self._image
+        return self._sitk_image
 
     @property
-    def mask(self):
-        return self._mask
+    def label(self):
+        return self._label
+
     @property
     def size(self):
-        return self._image.GetSize()
+        return self._sitk_image.GetSize()
 
     @property
     def spacing(self):
-        return self._image.GetSpacing()
+        return self._sitk_image.GetSpacing()
+
     @property
     def mask_size(self):
-        if self._mask:
-            return self._mask.GetSize()
+        if self._label:
+            return self._label.GetSize()
         else:
             return (0, 0, 0)

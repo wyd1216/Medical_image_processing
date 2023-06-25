@@ -64,13 +64,13 @@ def statistic_mean(dict_list):
     lower_q = np.quantile(dict_array, 0.25, interpolation='lower')  #下四分位数
     higher_q = np.quantile(dict_array, 0.75, interpolation='higher')  #上四分位数
 
-    print("min".ljust(15), "{}".format(round(min_value, 2)).ljust(10))
+    print("vmin".ljust(15), "{}".format(round(min_value, 2)).ljust(10))
     print("lower quartile".ljust(15), "{}".format(round(lower_q, 2)).ljust(10))
     print("mean".ljust(15), "{}".format(round(mean_value, 2)).ljust(10))
     print("median".ljust(15), "{}".format(round(median_value, 2)).ljust(10))
     print("higher quartile".ljust(15), "{}".format(round(higher_q,
                                                          2)).ljust(10))
-    print("max".ljust(15), "{}".format(round(max_value, 2)).ljust(10))
+    print("vmax".ljust(15), "{}".format(round(max_value, 2)).ljust(10))
 
 
 def show_statistic(statistic_list):
