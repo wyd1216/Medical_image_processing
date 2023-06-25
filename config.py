@@ -19,29 +19,45 @@ def str2bool(v):
 def get_args_parser():
     parser = argparse.ArgumentParser('Image preprocessing for machine learning', add_help=False)
     parser.add_argument('--tmp_keep', action='store_true', default=False)
-    # ------------------------------------------ information report_saved  ------------------------------------------------
+    # ------------------------------------------ Global Parameters    ------------------------------------------------
+    # It is better to set the global parameters here since each script will use the parameters.
+    parser.add_argument('--project_name', type=str, default='BeiDaRenMin-Osteosarcoma', help='The image path of multi info df')
+    parser.add_argument('--project_saved', type=str,
+                        default='/media/tx-deepocean/Data/workdir/wyd/2023/ChongYiFuEr_PN/medical_image_process/output',
+                        help='The image path of multi info df')
+
+    # ------------------------------------------ Path info statistics ------------------------------------------------
+    # It is better to set the global parameters here since each script will use the parameters.
+    parser.add_argument('--paths_image', type=str, help='The path of image folder or csv file')
+    parser.add_argument('--paths_label', type=str, default='', help='The path of folder(mask) or csv file(label)')
+    parser.add_argument('--paths_dataset', type=str, default='', help='The path of dataset information file.')
+
+    # ------------------------------------------ information report_saved  -------------------------------------------
     parser.add_argument('--report_title', default='', type=str, help='The title of report_saved')
     parser.add_argument('--report_describe', default='MRI dataset', type=str, help='Description about the dataset')
-    parser.add_argument('--image_path', type=str, help='If single then the path of image, if multi then csv info path')
+    parser.add_argument('--report_image_path', type=str,
+                        help='If single then the path of image, if multi then csv info path')
+    parser.add_argument('--report_mask_path', type=str, default=None,
+                        help='The mask path of single image')
     parser.add_argument('--report_image_col', type=str, default='image', help='The image path of multi info df')
-    parser.add_argument('--image_type', default='single', type=str, help='Image format')
+    parser.add_argument('--report_mask_col', type=str, default='', help='The mask path of multi info df')
     parser.add_argument('--report_saved_dir', default='./output/report_saved', type=str,
                         help='The path of report_saved saved')
-    parser.add_argument('--report_pdf', default='report.pdf', type=str, help='The name of saved pdf file')
+    parser.add_argument('--report_pdf', default='', type=str, help='The name of saved pdf file')
     parser.add_argument('--report_tmp_keep', action='store_true', default=False)
 
-
-    # ------------------------------------------ Format convert ------------------------------------------------
-    parser.add_argument('--convert_dataset_path', type=str, help='The path of all image used in dataset')
+    # ------------------------------------------ Format convertion ------------------------------------------------
+    parser.add_argument('--convert_csv_path', type=str, help='The path of image saved in csv file.')
+    parser.add_argument('--convert_out_csv_path', type=str, help='The path of out image saved in csv file.')
     parser.add_argument('--convert_dataset_depth', type=int, default=1,
                         help='The depth of data located')
-    parser.add_argument('--convert_dataset_saved', type=str, help='The path of converted data saved')
+    parser.add_argument('--convert_dataset_saved', type=str, help='The path of the root of new image and label saved')
+    parser.add_argument('--convert_dim', type=int, default=2, help='The dimension of input image')
     parser.add_argument('--convert_overwrite', action='store_true', default=False)
-    parser.add_argument('--convert_dim', type=int, default=2, help='The type of input format')
-    # Format key word: 'dicom', 'nii', 'png', 'npy', 'jpeg', 
-    parser.add_argument('--convert_in_format', type=str, help='The type of input format')
-    parser.add_argument('--convert_mask_path', type=str, default='', help='The type of input format')
+    # Format key word: 'dicom', 'nii', 'png', 'npy', 'jpeg',
+    parser.add_argument('--convert_input_format', type=str, help='The type of input format')
     parser.add_argument('--convert_out_format', type=str, help='The type of output format')
+    parser.add_argument('--convert_mask_path', type=str, default='', help='The type of input format')
     parser.add_argument('--convert_tmp_keep', action='store_true', default=False)
     parser.add_argument('--convert_extract', action='store_true', default=False)
 
